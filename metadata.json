@@ -1,0 +1,6 @@
+{
+  "name": "CG Ration Card Batch Extractor",
+  "description": "Extract ration card details from Chhattisgarh FCS portal (https://fcs.cg.gov.in/rcmodule/RptRationCardSearch.aspx) and export to Excel/CSV with batch progress and logs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
