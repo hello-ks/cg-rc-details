@@ -1,10 +1,38 @@
+import dns from 'node:dns';
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
-import * as cheerio from 'cheerio';
 import { isDbConfigured } from './src/db/index.ts';
 import { saveExtractedCardToDb, getAllCardsFromDb, getCardByRcNoFromDb, deleteCardFromDb } from './src/db/cards.ts';
 import { getAllApiKeysFromDb, createApiKeyInDb, deleteApiKeyFromDb, validateAndRecordApiKeyInDb } from './src/db/keys.ts';
+import {
+  getEposDistricts,
+  getEposBlocks,
+  getEposFps,
+  getEposRcList,
+  startHierarchyCrawl,
+  getHierarchyCrawlStatus,
+  stopHierarchyCrawl
+} from './src/services/eposService.ts';
+import {
+  startBackgroundQueue,
+  pauseBackgroundQueue,
+  resumeBackgroundQueue,
+  stopBackgroundQueue,
+  getBackgroundQueueStatus
+} from './src/services/backgroundQueue.ts';
+import { extractRationCardDetails } from './src/services/scraperEngine.ts';
+import { getHierarchyStats } from './src/db/eposHierarchy.ts';
+import {
+  loginUser,
+  verifySessionToken,
+  logoutUser,
+  changeUserPassword,
+  getDefaultAdminHint
+} from './src/services/authService.ts';
+
+// Enforce IPv4 resolution first to prevent 15-20s IPv6 timeouts on government portals (.gov.in)
+dns.setDefaultResultOrder('ipv4first');
 
 // Allow HTTPS government certificates
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -37,7 +65,7 @@ async function validateAndRecordApiKey(req: express.Request): Promise<ApiKeyReco
   let rawKey: string | undefined = req.headers['x-api-key'] as string;
   if (!rawKey && req.headers.authorization) {
     const auth = req.headers.authorization;
-    if (auth.startsWith('Bearer ')) {
+    if (auth.startsWith('Bearer ') && auth.slice(7).startsWith('cg_rc_')) {
       rawKey = auth.slice(7).trim();
     }
   }
@@ -61,284 +89,189 @@ async function validateAndRecordApiKey(req: express.Request): Promise<ApiKeyReco
   return null;
 }
 
-// Helper deterministic generator for fallback/demonstration when CG Portal is unreachable/captcha blocked
-function generateDeterministicRationCard(rcNo: string, fpsId: string = '412001080') {
-  const seed = Array.from(rcNo).reduce((acc, char) => acc + char.charCodeAt(0), 0);
-  
-  const cardTypes = [
-    { type: "प्राथमिकता (Priority)", code: "PRIORITY" },
-    { type: "अंत्योदय (Antyodaya)", code: "ANTYODAYA" },
-    { type: "निराश्रित (Destitute)", code: "DESTITUTE" },
-    { type: "सामान्य (General APL)", code: "GENERAL" }
-  ];
-  const chosenCardType = cardTypes[seed % cardTypes.length].type;
-
-  const femaleFirstNames = ["सुनीता", "अनिता", "कमला", "गीता", "पार्वती", "लक्ष्मी", "संतोषी", "सविता", "मंजू", "रामेश्वरी", "सकुन", "द्रौपदी", "फूलबाई", "तुलसी", "प्रमिला", "उर्मिला"];
-  const maleFirstNames = ["संतोष", "रामकुमार", "राकेश", "मनोज", "दीपक", "दिनेश", "सुरेश", "रमेश", "राजेश", "अशोक", "महेश", "संजय", "विष्णु", "कृष्ण", "गोपाल"];
-  const lastNames = ["साहू", "वर्मा", "पटेल", "यादव", "निषाद", "सिंहा", "ठाकुर", "सोनकर", "साहू", "कैवर्त", "चन्द्राकर", "कश्यप"];
-
-  const headFirstName = femaleFirstNames[seed % femaleFirstNames.length];
-  const headLastName = lastNames[(seed * 3) % lastNames.length];
-  const headName = `${headFirstName} ${headLastName}`;
-
-  const husbandName = `${maleFirstNames[(seed * 5) % maleFirstNames.length]} ${headLastName}`;
-  
-  const districts = ["रायपुर (Raipur)", "दुर्ग (Durg)", "बिलासपुर (Bilaspur)", "राजनांदगांव (Rajnandgaon)", "धमतरी (Dhamtari)", "बलौदाबाजार (Balodabazar)"];
-  const chosenDistrict = districts[seed % districts.length];
-
-  const blocks = ["धरसींवा (Dharsiwa)", "आरंग (Arang)", "अभनपुर (Abhanpur)", "पाटन (Patan)", "तिल्दा (Tilda)", "बिल्हा (Bilha)"];
-  const chosenBlock = blocks[(seed * 2) % blocks.length];
-
-  const gramPanchayats = ["कुरा (Kura)", "सेजा (Seja)", "टेमरी (Temri)", "बोरझरा (Borjhara)", "सिल्तरा (Siltara)", "दगोरी (Dagori)"];
-  const chosenGP = gramPanchayats[(seed * 4) % gramPanchayats.length];
-
-  const memberCount = (seed % 4) + 2; // 2 to 5 members
-
-  const members = [];
-  // Head
-  members.push({
-    sNo: 1,
-    name: headName,
-    gender: "महिला (Female)",
-    age: 32 + (seed % 25),
-    relation: "स्वयं (Head)",
-    aadhaarStatus: "eKYC पूर्ण (Done)",
-    memberId: `2238${rcNo.slice(-6)}01`
-  });
-
-  // Husband
-  members.push({
-    sNo: 2,
-    name: husbandName,
-    gender: "पुरुष (Male)",
-    age: 35 + (seed % 25),
-    relation: "पति (Husband)",
-    aadhaarStatus: "eKYC पूर्ण (Done)",
-    memberId: `2238${rcNo.slice(-6)}02`
-  });
-
-  // Children
-  for (let i = 3; i <= memberCount; i++) {
-    const isSon = (seed + i) % 2 === 0;
-    const childName = isSon
-      ? `${maleFirstNames[(seed * i) % maleFirstNames.length]} ${headLastName}`
-      : `${femaleFirstNames[(seed * i) % femaleFirstNames.length]} ${headLastName}`;
-    members.push({
-      sNo: i,
-      name: childName,
-      gender: isSon ? "पुरुष (Male)" : "महिला (Female)",
-      age: Math.max(4, 25 - (i * 4) - (seed % 3)),
-      relation: isSon ? "पुत्र (Son)" : "पुत्री (Daughter)",
-      aadhaarStatus: (seed + i) % 7 === 0 ? "eKYC लंबित (Pending)" : "eKYC पूर्ण (Done)",
-      memberId: `2238${rcNo.slice(-6)}0${i}`
-    });
+function extractSessionToken(req: express.Request): string | undefined {
+  const auth = req.headers.authorization;
+  if (auth && auth.startsWith('Bearer ')) {
+    const token = auth.slice(7).trim();
+    if (!token.startsWith('cg_rc_')) {
+      return token;
+    }
   }
-
-  return {
-    rcNo,
-    fpsId,
-    fpsName: `शासकीय उचित मूल्य दुकान - ${fpsId}`,
-    headName,
-    headNameHindi: headName,
-    guardianName: husbandName,
-    cardType: chosenCardType,
-    district: chosenDistrict,
-    block: chosenBlock,
-    gramPanchayat: chosenGP,
-    village: chosenGP,
-    totalMembers: members.length,
-    gasConnection: seed % 2 === 0 ? "हाँ (Yes)" : "नहीं (No)",
-    bankAadhaarSeeded: "Seeded",
-    members,
-    extractedAt: new Date().toISOString(),
-    status: 'success' as const,
-    source: 'simulated' as const
-  };
+  if (req.headers['x-session-token']) {
+    return String(req.headers['x-session-token']).trim();
+  }
+  if (req.query.sessionToken) {
+    return String(req.query.sessionToken).trim();
+  }
+  return undefined;
 }
 
-// Core Extractor Function
-async function extractRationCardDetails(rcNo: string, fpsId: string = '412001080', allowFallback: boolean = true) {
-  const cleanRcNo = rcNo.trim();
-  const startTime = Date.now();
+// Security Middleware: Requires Valid Login Session OR Authorized API Key
+async function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const token = extractSessionToken(req);
+  if (token) {
+    const user = await verifySessionToken(token);
+    if (user) {
+      (req as any).user = user;
+      return next();
+    }
+  }
 
+  // Also check if valid API key is supplied
+  const apiKeyRecord = await validateAndRecordApiKey(req);
+  if (apiKeyRecord) {
+    (req as any).apiKey = apiKeyRecord;
+    return next();
+  }
+
+  return res.status(401).json({
+    error: 'Access Denied: Secure login required to access Chhattisgarh FCS portal tools.',
+    authRequired: true,
+    status: 'unauthorized'
+  });
+}
+
+// -------------------------------------------------------------
+// SECURE AUTHENTICATION ENDPOINTS
+// -------------------------------------------------------------
+
+// User Login Endpoint
+app.post('/api/auth/login', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ success: false, error: 'Username and password are required.' });
+  }
+
+  const clientIp = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'client');
+  const result = await loginUser(username, password, clientIp);
+
+  if (result.success) {
+    res.json(result);
+  } else {
+    res.status(401).json(result);
+  }
+});
+
+// Current User Profile Verification
+app.get('/api/auth/me', async (req, res) => {
+  const token = extractSessionToken(req);
+  if (!token) {
+    return res.status(401).json({ authenticated: false, error: 'No active session token' });
+  }
+
+  const user = await verifySessionToken(token);
+  if (user) {
+    res.json({ authenticated: true, user });
+  } else {
+    res.status(401).json({ authenticated: false, error: 'Session expired or invalid' });
+  }
+});
+
+// User Logout Endpoint
+app.post('/api/auth/logout', async (req, res) => {
+  const token = extractSessionToken(req);
+  await logoutUser(token);
+  res.json({ success: true, message: 'Logged out successfully' });
+});
+
+// Change Password Endpoint (Protected)
+app.post('/api/auth/change-password', requireAuth, async (req, res) => {
+  const user = (req as any).user;
+  if (!user) {
+    return res.status(401).json({ success: false, error: 'Session required to change password' });
+  }
+
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ success: false, error: 'Current password and new password are required' });
+  }
+
+  const result = await changeUserPassword(user.username, currentPassword, newPassword);
+  if (result.success) {
+    res.json({ success: true, message: 'Password updated successfully.' });
+  } else {
+    res.status(400).json(result);
+  }
+});
+
+// Initial Setup & Credentials Hint Endpoint
+app.get('/api/auth/hint', (req, res) => {
+  const hint = getDefaultAdminHint();
+  res.json({
+    hasAdmin: true,
+    defaultUsername: hint.defaultUsername,
+    defaultPassword: hint.defaultPassword
+  });
+});
+
+
+// -------------------------------------------------------------
+// AUTONOMOUS SERVER-SIDE BACKGROUND QUEUE ENDPOINTS
+// -------------------------------------------------------------
+
+// Start or enqueue items into server background worker
+app.post('/api/background-queue/start', requireAuth, async (req, res) => {
   try {
-    const searchUrl = 'https://fcs.cg.gov.in/rcmodule/RptRationCardSearch.aspx';
-    let isLiveSuccess = false;
-    let liveData: any = null;
-
-    try {
-      // Step 1: GET initial page to grab ASP.NET viewstate
-      const getRes = await fetch(searchUrl, {
-        method: 'GET',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'hi,en-US;q=0.9,en;q=0.8'
-        },
-        signal: AbortSignal.timeout(10000)
-      });
-
-      if (getRes.ok) {
-        const getHtml = await getRes.text();
-        const $get = cheerio.load(getHtml);
-
-        const viewState = $get('#__VIEWSTATE').val() || '';
-        const viewStateGen = $get('#__VIEWSTATEGENERATOR').val() || '';
-        const eventValidation = $get('#__EVENTVALIDATION').val() || '';
-
-        // Step 2: POST form with ration card number
-        const params = new URLSearchParams();
-        params.append('__VIEWSTATE', String(viewState));
-        if (viewStateGen) params.append('__VIEWSTATEGENERATOR', String(viewStateGen));
-        if (eventValidation) params.append('__EVENTVALIDATION', String(eventValidation));
-        params.append('ctl00$ContentPlaceHolder1$txt_Rationcardno', cleanRcNo);
-        params.append('ctl00$ContentPlaceHolder1$Search', 'खोजे');
-
-        const postRes = await fetch(searchUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': searchUrl,
-            'Accept-Language': 'hi,en-US;q=0.9,en;q=0.8'
-          },
-          body: params.toString(),
-          signal: AbortSignal.timeout(12000)
-        });
-
-        if (postRes.ok) {
-          const postHtml = await postRes.text();
-          const $post = cheerio.load(postHtml);
-
-          const guardianName = $post('#ContentPlaceHolder1_lb_FH_Name').text().trim() || 'N/A';
-          const district = $post('#ContentPlaceHolder1_lb_district').text().trim() || 'N/A';
-          const gpRaw = $post('#ContentPlaceHolder1_lb_Ward_Panchayat').text().trim();
-          const gramPanchayat = gpRaw.replace(/\/$/, '') || 'N/A';
-          const village = $post('#ContentPlaceHolder1_lb_Village').text().trim() || gramPanchayat;
-          const cardType = $post('#ContentPlaceHolder1_lb_RC_Color').text().trim() || 'प्राथमिकता';
-          const blockRaw = $post('#ContentPlaceHolder1_lb_blockNNN').text().trim();
-          const block = blockRaw.replace(/^\//, '') || 'N/A';
-          const fpsName = $post('#ContentPlaceHolder1_lb_ShopNo').text().trim() || `उचित मूल्य दुकान - ${fpsId}`;
-          const bankStatus = $post('#ContentPlaceHolder1_lb_BankAccount').text().trim() || 'अकाउंट प्राप्त';
-
-          const members: any[] = [];
-          $post('#ContentPlaceHolder1_grid1 tr').each((idx, tr) => {
-            if (idx === 0) return; // Skip table header
-            const cols = $post(tr).find('td');
-            if (cols.length >= 4) {
-              members.push({
-                sNo: idx,
-                name: $post(cols[0]).text().trim(),
-                age: $post(cols[1]).text().trim(),
-                gender: $post(cols[2]).text().trim(),
-                relation: $post(cols[3]).text().trim(),
-                aadhaarStatus: cols.length > 4 ? $post(cols[4]).text().trim() : 'आधार नंबर'
-              });
-            }
-          });
-
-          if (members.length > 0 || district !== 'N/A' || guardianName !== 'N/A') {
-            const headMember = members.find(m => m.relation.includes('स्वयं') || m.relation.includes('मुखिया')) || members[0];
-            const headName = headMember ? headMember.name : (guardianName !== 'N/A' ? guardianName : 'N/A');
-
-            isLiveSuccess = true;
-            liveData = {
-              rcNo: cleanRcNo,
-              fpsId,
-              fpsName,
-              headName,
-              headNameHindi: headName,
-              guardianName,
-              cardType,
-              district,
-              block,
-              gramPanchayat,
-              village,
-              totalMembers: members.length,
-              gasConnection: 'हाँ (Yes)',
-              bankAadhaarSeeded: bankStatus,
-              members: members.length > 0 ? members : [{
-                sNo: 1,
-                name: headName,
-                gender: 'महिला',
-                age: 'N/A',
-                relation: 'स्वयं',
-                aadhaarStatus: 'आधार नंबर'
-              }],
-              extractedAt: new Date().toISOString(),
-              status: 'success' as const,
-              source: 'live' as const,
-              durationMs: Date.now() - startTime
-            };
-          }
-        }
-      }
-    } catch (netErr: any) {
-      console.warn(`[Live Extraction Warning] Search failed for ${cleanRcNo}: ${netErr.message}`);
-    }
-
-    if (isLiveSuccess && liveData) {
-      // Auto-save to RDBMS
-      await saveExtractedCardToDb(liveData);
-      return { httpStatus: 200, data: liveData };
-    }
-
-    if (allowFallback) {
-      const generated = generateDeterministicRationCard(cleanRcNo, fpsId);
-      const resData = {
-        ...generated,
-        durationMs: Date.now() - startTime,
-        errorMessage: 'Live server response restricted by portal firewall. Loaded via portal schema engine.'
-      };
-      // Auto-save generated to RDBMS
-      await saveExtractedCardToDb(resData);
-      return {
-        httpStatus: 200,
-        data: resData
-      };
-    }
-
-    return {
-      httpStatus: 502,
-      data: {
-        error: 'Unable to reach CG FCS portal server (https://fcs.cg.gov.in/rcmodule/RptRationCardSearch.aspx). The portal may be down or blocking incoming cloud IP requests.',
-        rcNo: cleanRcNo,
-        status: 'error',
-        durationMs: Date.now() - startTime
-      }
-    };
+    const { items, fpsId, concurrency, delayMs } = req.body;
+    const result = await startBackgroundQueue({ items, fpsId, concurrency, delayMs });
+    res.json(result);
   } catch (err: any) {
-    console.error(`[Extraction Error] for ${cleanRcNo}:`, err);
-    if (allowFallback) {
-      const fallbackData = generateDeterministicRationCard(cleanRcNo, fpsId);
-      const resData = {
-        ...fallbackData,
-        durationMs: Date.now() - startTime,
-        errorMessage: `Portal notice: ${err.message || 'Network delay'}`
-      };
-      await saveExtractedCardToDb(resData);
-      return {
-        httpStatus: 200,
-        data: resData
-      };
-    }
-    return {
-      httpStatus: 500,
-      data: {
-        error: err.message || 'Internal extraction failure',
-        rcNo: cleanRcNo,
-        status: 'error'
-      }
-    };
+    res.status(500).json({ success: false, error: err.message });
   }
-}
+});
+
+// Pause server background worker
+app.post('/api/background-queue/pause', requireAuth, (req, res) => {
+  const result = pauseBackgroundQueue();
+  res.json(result);
+});
+
+// Resume server background worker
+app.post('/api/background-queue/resume', requireAuth, (req, res) => {
+  const result = resumeBackgroundQueue();
+  res.json(result);
+});
+
+// Stop server background worker
+app.post('/api/background-queue/stop', requireAuth, (req, res) => {
+  const result = stopBackgroundQueue();
+  res.json(result);
+});
+
+// Get real-time status of server background worker
+app.get('/api/background-queue/status', requireAuth, (req, res) => {
+  const status = getBackgroundQueueStatus();
+  res.json(status);
+});
+
+// -------------------------------------------------------------
+// AUTOMATED HIERARCHY CRAWLER ENDPOINTS
+// -------------------------------------------------------------
+
+// Start crawler across all 33 districts & blocks
+app.post('/api/epos/crawl-hierarchy', requireAuth, async (req, res) => {
+  const result = await startHierarchyCrawl();
+  res.json(result);
+});
+
+// Stop crawler
+app.post('/api/epos/crawl-stop', requireAuth, (req, res) => {
+  const result = stopHierarchyCrawl();
+  res.json(result);
+});
+
+// Get crawler status & live logs
+app.get('/api/epos/crawl-status', requireAuth, (req, res) => {
+  const status = getHierarchyCrawlStatus();
+  res.json(status);
+});
 
 // -------------------------------------------------------------
 // RDBMS CLOUD SQL DATABASE ENDPOINTS
 // -------------------------------------------------------------
 
 // Fetch all stored records from PostgreSQL
-app.get('/api/db/cards', async (req, res) => {
+app.get('/api/db/cards', requireAuth, async (req, res) => {
   const cards = await getAllCardsFromDb();
   res.json({
     dbConfigured: isDbConfigured(),
@@ -348,7 +281,7 @@ app.get('/api/db/cards', async (req, res) => {
 });
 
 // Fetch single record from PostgreSQL
-app.get('/api/db/cards/:rcNo', async (req, res) => {
+app.get('/api/db/cards/:rcNo', requireAuth, async (req, res) => {
   const card = await getCardByRcNoFromDb(req.params.rcNo);
   if (!card) {
     return res.status(404).json({ error: 'Card not found in database', status: 'not_found' });
@@ -357,13 +290,13 @@ app.get('/api/db/cards/:rcNo', async (req, res) => {
 });
 
 // Delete single record from PostgreSQL
-app.delete('/api/db/cards/:rcNo', async (req, res) => {
+app.delete('/api/db/cards/:rcNo', requireAuth, async (req, res) => {
   const success = await deleteCardFromDb(req.params.rcNo);
   res.json({ success });
 });
 
 // Bulk Sync records into PostgreSQL
-app.post('/api/db/sync', async (req, res) => {
+app.post('/api/db/sync', requireAuth, async (req, res) => {
   const { cards } = req.body;
   if (!Array.isArray(cards)) {
     return res.status(400).json({ error: 'Body field "cards" must be an array', status: 'bad_request' });
@@ -379,10 +312,11 @@ app.post('/api/db/sync', async (req, res) => {
 });
 
 // Database summary stats
-app.get('/api/db/stats', async (req, res) => {
+app.get('/api/db/stats', requireAuth, async (req, res) => {
   const cards = await getAllCardsFromDb();
   const totalMembers = cards.reduce((acc, c) => acc + (c.totalMembers || 0), 0);
   const districts = Array.from(new Set(cards.map(c => c.district))).filter(Boolean);
+  const hierarchyStats = await getHierarchyStats();
 
   res.json({
     dbEngine: 'Cloud SQL PostgreSQL',
@@ -391,8 +325,83 @@ app.get('/api/db/stats', async (req, res) => {
     database: process.env.SQL_DB_NAME || 'postgres',
     totalCardsSaved: cards.length,
     totalMembersSaved: totalMembers,
-    uniqueDistricts: districts.length
+    uniqueDistricts: districts.length,
+    hierarchy: hierarchyStats
   });
+});
+
+// -------------------------------------------------------------
+// EPOS CHHATTISGARH STATE DIRECT SEARCH & DRILLDOWN ENDPOINTS
+// -------------------------------------------------------------
+
+// 1. Get list of Districts (cached in RDBMS)
+app.get('/api/epos/districts', requireAuth, async (req, res) => {
+  try {
+    const forceRefresh = req.query.refresh === 'true';
+    const districts = await getEposDistricts(forceRefresh);
+    res.json({ success: true, count: districts.length, districts });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2. Get list of Blocks for a District (cached in RDBMS)
+app.get('/api/epos/blocks', requireAuth, async (req, res) => {
+  try {
+    const distCode = String(req.query.distCode || '').trim();
+    const forceRefresh = req.query.refresh === 'true';
+    if (!distCode) {
+      return res.status(400).json({ success: false, error: 'distCode is required' });
+    }
+    const blocks = await getEposBlocks(distCode, forceRefresh);
+    res.json({ success: true, distCode, count: blocks.length, blocks });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 3. Get list of FPS (Fair Price Shops) for a Block (cached in RDBMS)
+app.get('/api/epos/fps', requireAuth, async (req, res) => {
+  try {
+    const distCode = String(req.query.distCode || '').trim();
+    const blockCode = String(req.query.blockCode || '').trim();
+    const forceRefresh = req.query.refresh === 'true';
+    if (!distCode || !blockCode) {
+      return res.status(400).json({ success: false, error: 'distCode and blockCode are required' });
+    }
+    const fpsList = await getEposFps(distCode, blockCode, forceRefresh);
+    res.json({ success: true, distCode, blockCode, count: fpsList.length, fpsList });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4. Get RC list for selected FPS (cached in RDBMS)
+app.get('/api/epos/rc-list', requireAuth, async (req, res) => {
+  try {
+    const distCode = String(req.query.distCode || '').trim();
+    const blockCode = String(req.query.blockCode || '').trim();
+    const fpsId = String(req.query.fpsId || '').trim();
+    const month = req.query.month ? Number(req.query.month) : 9;
+    const year = req.query.year ? Number(req.query.year) : 2026;
+    const forceRefresh = req.query.refresh === 'true';
+
+    if (!distCode || !blockCode || !fpsId) {
+      return res.status(400).json({ success: false, error: 'distCode, blockCode, and fpsId are required' });
+    }
+
+    const rcList = await getEposRcList(distCode, blockCode, fpsId, month, year, forceRefresh);
+    res.json({
+      success: true,
+      distCode,
+      blockCode,
+      fpsId,
+      count: rcList.length,
+      rcList
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // -------------------------------------------------------------
@@ -400,7 +409,7 @@ app.get('/api/db/stats', async (req, res) => {
 // -------------------------------------------------------------
 
 // List API Keys
-app.get('/api/keys', async (req, res) => {
+app.get('/api/keys', requireAuth, async (req, res) => {
   if (isDbConfigured()) {
     const dbKeys = await getAllApiKeysFromDb();
     if (dbKeys.length > 0) {
@@ -411,7 +420,7 @@ app.get('/api/keys', async (req, res) => {
 });
 
 // Create New API Key
-app.post('/api/keys', async (req, res) => {
+app.post('/api/keys', requireAuth, async (req, res) => {
   const { label } = req.body;
   const keyLabel = (label && typeof label === 'string' && label.trim()) ? label.trim() : 'Remote Integration App';
   
@@ -438,7 +447,7 @@ app.post('/api/keys', async (req, res) => {
 });
 
 // Revoke API Key
-app.delete('/api/keys/:key', async (req, res) => {
+app.delete('/api/keys/:key', requireAuth, async (req, res) => {
   const targetKey = req.params.key;
 
   if (isDbConfigured()) {
@@ -517,10 +526,142 @@ app.post('/api/v1/extract', async (req, res) => {
   return res.status(result.httpStatus).json(result.data);
 });
 
-// Web Application Extraction Route (Used by Browser UI)
-app.post('/api/extract-ration-card', async (req, res) => {
-  await validateAndRecordApiKey(req);
+// Remote GET Endpoint: /api/v1/epos/districts
+app.get('/api/v1/epos/districts', async (req, res) => {
+  const keyRecord = await validateAndRecordApiKey(req);
+  if (!keyRecord) {
+    return res.status(401).json({ error: 'Unauthorized: Valid API Key is required.', status: 'unauthorized' });
+  }
+  try {
+    const forceRefresh = req.query.refresh === 'true';
+    const districts = await getEposDistricts(forceRefresh);
+    res.json({ success: true, count: districts.length, districts });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
+// Remote GET Endpoint: /api/v1/epos/blocks?distCode=...
+app.get('/api/v1/epos/blocks', async (req, res) => {
+  const keyRecord = await validateAndRecordApiKey(req);
+  if (!keyRecord) {
+    return res.status(401).json({ error: 'Unauthorized: Valid API Key is required.', status: 'unauthorized' });
+  }
+  try {
+    const distCode = String(req.query.distCode || '').trim();
+    const forceRefresh = req.query.refresh === 'true';
+    if (!distCode) return res.status(400).json({ error: 'Query param "distCode" is required.' });
+    const blocks = await getEposBlocks(distCode, forceRefresh);
+    res.json({ success: true, distCode, count: blocks.length, blocks });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Remote GET Endpoint: /api/v1/epos/fps?distCode=...&blockCode=...
+app.get('/api/v1/epos/fps', async (req, res) => {
+  const keyRecord = await validateAndRecordApiKey(req);
+  if (!keyRecord) {
+    return res.status(401).json({ error: 'Unauthorized: Valid API Key is required.', status: 'unauthorized' });
+  }
+  try {
+    const distCode = String(req.query.distCode || '').trim();
+    const blockCode = String(req.query.blockCode || '').trim();
+    const forceRefresh = req.query.refresh === 'true';
+    if (!distCode || !blockCode) {
+      return res.status(400).json({ error: 'Query params "distCode" and "blockCode" are required.' });
+    }
+    const fpsList = await getEposFps(distCode, blockCode, forceRefresh);
+    res.json({ success: true, distCode, blockCode, count: fpsList.length, fpsList });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Remote GET Endpoint: /api/v1/epos/fps/:fpsId/cards?distCode=...&blockCode=...
+app.get('/api/v1/epos/fps/:fpsId/cards', async (req, res) => {
+  const keyRecord = await validateAndRecordApiKey(req);
+  if (!keyRecord) {
+    return res.status(401).json({ error: 'Unauthorized: Valid API Key is required.', status: 'unauthorized' });
+  }
+  try {
+    const fpsId = req.params.fpsId;
+    const distCode = String(req.query.distCode || '').trim();
+    const blockCode = String(req.query.blockCode || '').trim();
+    const month = req.query.month ? Number(req.query.month) : 9;
+    const year = req.query.year ? Number(req.query.year) : 2026;
+
+    if (!distCode || !blockCode) {
+      return res.status(400).json({ error: 'Query params "distCode" and "blockCode" are required.' });
+    }
+
+    const rcList = await getEposRcList(distCode, blockCode, fpsId, month, year);
+    res.json({ success: true, fpsId, count: rcList.length, cards: rcList });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Remote GET Endpoint: /api/v1/cards (stored in PostgreSQL)
+app.get('/api/v1/cards', async (req, res) => {
+  const keyRecord = await validateAndRecordApiKey(req);
+  if (!keyRecord) {
+    return res.status(401).json({ error: 'Unauthorized: Valid API Key is required.', status: 'unauthorized' });
+  }
+  try {
+    let cards = await getAllCardsFromDb();
+    const q = req.query.q ? String(req.query.q).toLowerCase().trim() : '';
+    const district = req.query.district ? String(req.query.district).toLowerCase().trim() : '';
+    const fpsId = req.query.fpsId ? String(req.query.fpsId).trim() : '';
+
+    if (district) {
+      cards = cards.filter(c => (c.district || '').toLowerCase().includes(district));
+    }
+    if (fpsId) {
+      cards = cards.filter(c => c.fpsId === fpsId);
+    }
+    if (q) {
+      cards = cards.filter(c => 
+        c.rcNo.includes(q) || 
+        (c.headName || '').toLowerCase().includes(q) ||
+        (c.village || '').toLowerCase().includes(q)
+      );
+    }
+
+    const limit = Math.min(100, Math.max(1, req.query.limit ? Number(req.query.limit) : 50));
+    const page = Math.max(1, req.query.page ? Number(req.query.page) : 1);
+    const total = cards.length;
+    const paginated = cards.slice((page - 1) * limit, page * limit);
+
+    res.json({
+      success: true,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      cards: paginated
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Remote GET Endpoint: /api/v1/cards/:rcNo
+app.get('/api/v1/cards/:rcNo', async (req, res) => {
+  const keyRecord = await validateAndRecordApiKey(req);
+  if (!keyRecord) {
+    return res.status(401).json({ error: 'Unauthorized: Valid API Key is required.', status: 'unauthorized' });
+  }
+  const card = await getCardByRcNoFromDb(req.params.rcNo);
+  if (!card) {
+    return res.status(404).json({ error: 'Card not found in database', status: 'not_found' });
+  }
+  res.json({ success: true, card });
+});
+
+
+// Web Application Extraction Route (Used by Browser UI - Protected by Login / API Key)
+app.post('/api/extract-ration-card', requireAuth, async (req, res) => {
   const { rcNo, fpsId = '412001080', allowFallback = true } = req.body;
 
   if (!rcNo || typeof rcNo !== 'string') {

@@ -20,6 +20,7 @@ import {
   Sparkles,
   Server
 } from 'lucide-react';
+import { apiFetch } from '../utils/api';
 import { ApiKeyRecord } from '../types';
 
 interface ApiKeyModalProps {
@@ -50,7 +51,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({ isOpen, onClose }) => 
   const fetchKeys = async () => {
     setIsLoadingKeys(true);
     try {
-      const res = await fetch('/api/keys');
+      const res = await apiFetch('/api/keys');
       if (res.ok) {
         const data = await res.json();
         setKeys(data.keys || []);
@@ -77,7 +78,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({ isOpen, onClose }) => 
 
     setIsCreating(true);
     try {
-      const res = await fetch('/api/keys', {
+      const res = await apiFetch('/api/keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ label: newLabel.trim() || 'Remote Client App' })
@@ -94,12 +95,8 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({ isOpen, onClose }) => 
   };
 
   const handleRevokeKey = async (key: string) => {
-    if (!window.confirm('Are you sure you want to revoke this API key? Remote applications using this key will immediately lose access.')) {
-      return;
-    }
-
     try {
-      const res = await fetch(`/api/keys/${encodeURIComponent(key)}`, {
+      const res = await apiFetch(`/api/keys/${encodeURIComponent(key)}`, {
         method: 'DELETE'
       });
       if (res.ok) {
@@ -583,7 +580,7 @@ else:
               <div className="bg-slate-950/60 border border-slate-800 p-4 rounded-xl space-y-3">
                 <h4 className="text-xs font-bold text-slate-200 flex items-center gap-2">
                   <Layers className="w-4 h-4 text-emerald-400" />
-                  REST API Endpoint Reference
+                  REST API Endpoint Reference (Protected by API Key)
                 </h4>
 
                 <div className="space-y-2 text-xs">
@@ -592,15 +589,55 @@ else:
                       <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 font-bold font-mono rounded text-[11px]">GET</span>
                       <code className="text-white font-mono font-semibold">/api/v1/extract</code>
                     </div>
-                    <span className="text-slate-400 text-[11px]">Query params: <code className="text-emerald-300">rcNo</code>, <code className="text-emerald-300">fpsId</code>, <code className="text-emerald-300">apiKey</code></span>
+                    <span className="text-slate-400 text-[11px]">Extract single card: <code className="text-emerald-300">?rcNo=...&fpsId=...</code></span>
                   </div>
 
                   <div className="bg-slate-900 p-3 rounded-lg border border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 font-bold font-mono rounded text-[11px]">GET</span>
-                      <code className="text-white font-mono font-semibold">/api/v1/card/:rcNo</code>
+                      <code className="text-white font-mono font-semibold">/api/v1/cards</code>
                     </div>
-                    <span className="text-slate-400 text-[11px]">Headers: <code className="text-emerald-300">X-API-Key</code> or <code className="text-emerald-300">Authorization: Bearer &lt;key&gt;</code></span>
+                    <span className="text-slate-400 text-[11px]">Query Cloud SQL DB: <code className="text-emerald-300">?q=...&district=...&page=1</code></span>
+                  </div>
+
+                  <div className="bg-slate-900 p-3 rounded-lg border border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 font-bold font-mono rounded text-[11px]">GET</span>
+                      <code className="text-white font-mono font-semibold">/api/v1/cards/:rcNo</code>
+                    </div>
+                    <span className="text-slate-400 text-[11px]">Fetch card + family members stored in PostgreSQL</span>
+                  </div>
+
+                  <div className="bg-slate-900 p-3 rounded-lg border border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 bg-sky-500/20 text-sky-400 font-bold font-mono rounded text-[11px]">GET</span>
+                      <code className="text-white font-mono font-semibold">/api/v1/epos/districts</code>
+                    </div>
+                    <span className="text-slate-400 text-[11px]">List all 33 Chhattisgarh districts</span>
+                  </div>
+
+                  <div className="bg-slate-900 p-3 rounded-lg border border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 bg-sky-500/20 text-sky-400 font-bold font-mono rounded text-[11px]">GET</span>
+                      <code className="text-white font-mono font-semibold">/api/v1/epos/blocks</code>
+                    </div>
+                    <span className="text-slate-400 text-[11px]">Query params: <code className="text-sky-300">?distCode=412</code></span>
+                  </div>
+
+                  <div className="bg-slate-900 p-3 rounded-lg border border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 bg-sky-500/20 text-sky-400 font-bold font-mono rounded text-[11px]">GET</span>
+                      <code className="text-white font-mono font-semibold">/api/v1/epos/fps</code>
+                    </div>
+                    <span className="text-slate-400 text-[11px]">Query params: <code className="text-sky-300">?distCode=412&blockCode=412001</code></span>
+                  </div>
+
+                  <div className="bg-slate-900 p-3 rounded-lg border border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 bg-sky-500/20 text-sky-400 font-bold font-mono rounded text-[11px]">GET</span>
+                      <code className="text-white font-mono font-semibold">/api/v1/epos/fps/:fpsId/cards</code>
+                    </div>
+                    <span className="text-slate-400 text-[11px]">Fetch all resident RC numbers for this FPS</span>
                   </div>
 
                   <div className="bg-slate-900 p-3 rounded-lg border border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">

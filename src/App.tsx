@@ -8,10 +8,14 @@ import { LogViewer } from './components/LogViewer';
 import { CardDetailModal } from './components/CardDetailModal';
 import { ApiKeyModal } from './components/ApiKeyModal';
 import { DatabaseModal } from './components/DatabaseModal';
+import { ServerBackgroundQueueWidget } from './components/ServerBackgroundQueueWidget';
+import { LoginGate } from './components/LoginGate';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { apiFetch } from './utils/api';
 import { ATTACHED_RATION_CARDS } from './data/attachedList';
 import { BatchJobItem, BatchJobConfig, BatchProgress, LogEntry, ExtractedRationCardDetails } from './types';
 
-export default function App() {
+function Dashboard() {
   const [queue, setQueue] = useState<BatchJobItem[]>([]);
   const [config, setConfig] = useState<BatchJobConfig>({
     concurrency: 2,
@@ -58,7 +62,7 @@ export default function App() {
   useEffect(() => {
     const checkHealth = async () => {
       try {
-        const res = await fetch('/api/health');
+        const res = await apiFetch('/api/health');
         if (res.ok) {
           setIsBackendConnected(true);
         }
@@ -103,7 +107,7 @@ export default function App() {
     setLogs(prev => [...prev.slice(-300), newLog]); // Keep last 300 logs
   };
 
-  const handleLoadItems = (items: { rcNo: string; fpsId: string }[]) => {
+  const handleLoadItems = (items: { rcNo: string; fpsId: string }[], autoStart: boolean = false) => {
     const newJobs: BatchJobItem[] = items.map(item => ({
       id: `job-${item.rcNo}-${Math.random().toString(36).substring(2, 7)}`,
       rcNo: item.rcNo,
@@ -126,6 +130,12 @@ export default function App() {
     });
 
     addLog('info', `Loaded ${newJobs.length} ration cards into extraction queue.`);
+
+    if (autoStart && newJobs.length > 0) {
+      setTimeout(() => {
+        startExtractionBatch();
+      }, 100);
+    }
   };
 
   const handleUpdateConfig = (newConfig: Partial<BatchJobConfig>) => {
@@ -199,7 +209,7 @@ export default function App() {
       addLog('info', `Worker #${workerId} requesting details for Ration Card`, rcNo);
 
       try {
-        const response = await fetch('/api/extract-ration-card', {
+        const response = await apiFetch('/api/extract-ration-card', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -367,7 +377,7 @@ export default function App() {
       />
 
       {/* Main Container */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 space-y-6">
         {/* Input & Source Selector */}
         <InputSection
           onLoadItems={handleLoadItems}
@@ -376,6 +386,9 @@ export default function App() {
           isProcessing={progress.status === 'running'}
           currentQueueCount={queue.length}
         />
+
+        {/* Autonomous Server Background Queue Live Widget (Visible when active or jobs enqueued) */}
+        <ServerBackgroundQueueWidget />
 
         {/* Analytical Stats Bar */}
         <StatsOverview items={queue} />
@@ -418,3 +431,33 @@ export default function App() {
     </div>
   );
 }
+
+function AuthenticatedApp() {
+  const { isAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 text-slate-100">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-9 h-9 border-2 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin" />
+          <p className="text-xs text-slate-400 font-mono">Verifying credentials & session...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <LoginGate />;
+  }
+
+  return <Dashboard />;
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <AuthenticatedApp />
+    </AuthProvider>
+  );
+}
+

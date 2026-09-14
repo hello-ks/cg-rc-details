@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
-import { Upload, FileText, ListOrdered, Search, Settings, CheckCircle2, AlertCircle, ArrowRight, RefreshCw, Zap } from 'lucide-react';
+import { Upload, FileText, ListOrdered, Search, Settings, CheckCircle2, AlertCircle, ArrowRight, RefreshCw, Zap, Layers, Building2 } from 'lucide-react';
 import { ATTACHED_RATION_CARDS } from '../data/attachedList';
 import { parseUploadedFileContent } from '../utils/exportUtils';
 import { BatchJobConfig } from '../types';
+import { CgPortalHierarchyPicker } from './CgPortalHierarchyPicker';
 
 interface InputSectionProps {
-  onLoadItems: (items: { rcNo: string; fpsId: string }[]) => void;
+  onLoadItems: (items: { rcNo: string; fpsId: string }[], autoStart?: boolean) => void;
   config: BatchJobConfig;
   onUpdateConfig: (newConfig: Partial<BatchJobConfig>) => void;
   isProcessing: boolean;
@@ -19,7 +20,7 @@ export const InputSection: React.FC<InputSectionProps> = ({
   isProcessing,
   currentQueueCount
 }) => {
-  const [activeTab, setActiveTab] = useState<'attached' | 'paste' | 'upload' | 'single'>('attached');
+  const [activeTab, setActiveTab] = useState<'cg_portal' | 'attached' | 'paste' | 'upload' | 'single'>('cg_portal');
   const [pastedText, setPastedText] = useState('');
   const [singleRcNo, setSingleRcNo] = useState('');
   const [singleFpsId, setSingleFpsId] = useState('412001080');
@@ -83,6 +84,21 @@ export const InputSection: React.FC<InputSectionProps> = ({
       <div className="bg-slate-950/80 border-b border-slate-800 px-4 pt-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 overflow-x-auto pb-2 scrollbar-none">
           <button
+            onClick={() => setActiveTab('cg_portal')}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-medium transition ${
+              activeTab === 'cg_portal'
+                ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 font-semibold shadow-sm'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+            }`}
+          >
+            <Layers className="w-4 h-4 text-indigo-400" />
+            <span>CG State Drilldown (District / Block / FPS)</span>
+            <span className="ml-1 px-1.5 py-0.5 text-[9px] font-bold bg-indigo-500/30 text-indigo-200 rounded uppercase tracking-wider">
+              Direct RDBMS
+            </span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('attached')}
             className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-medium transition ${
               activeTab === 'attached'
@@ -91,8 +107,7 @@ export const InputSection: React.FC<InputSectionProps> = ({
             }`}
           >
             <ListOrdered className="w-4 h-4 text-emerald-400" />
-            <span>Attached List ({attachedCount} items)</span>
-            <span className="ml-1 px-1.5 py-0.2 text-[10px] bg-emerald-500/20 text-emerald-300 rounded">Attached</span>
+            <span>Attached List ({attachedCount})</span>
           </button>
 
           <button
@@ -213,6 +228,14 @@ export const InputSection: React.FC<InputSectionProps> = ({
 
       {/* Tab Content Body */}
       <div className="p-5">
+        {/* Primary Tab: CG Portal Drilldown (District -> Block -> FPS) */}
+        {activeTab === 'cg_portal' && (
+          <CgPortalHierarchyPicker
+            onSupplyRcListToScraper={onLoadItems}
+            isProcessing={isProcessing}
+          />
+        )}
+
         {/* Tab 1: Attached List */}
         {activeTab === 'attached' && (
           <div className="flex flex-col sm:flex-row items-center justify-between gap-4">

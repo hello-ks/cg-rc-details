@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Database, Search, Download, Trash2, RefreshCw, X, HardDrive, CheckCircle2, ShieldCheck, FileSpreadsheet, Layers, UserCheck } from 'lucide-react';
+import { apiFetch } from '../utils/api';
 import { ExtractedRationCardDetails } from '../types';
 import * as XLSX from 'xlsx';
 
@@ -18,19 +19,26 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
     totalCardsSaved: number;
     totalMembersSaved: number;
     uniqueDistricts: number;
+    hierarchy?: {
+      districtsCount: number;
+      blocksCount: number;
+      fpsCount: number;
+      rcCount: number;
+    };
   } | null>(null);
 
   const [cards, setCards] = useState<ExtractedRationCardDetails[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [syncing, setSyncing] = useState(false);
+  const [deletingRcNo, setDeletingRcNo] = useState<string | null>(null);
 
   const fetchDbData = async () => {
     setLoading(true);
     try {
       const [statsRes, cardsRes] = await Promise.all([
-        fetch('/api/db/stats'),
-        fetch('/api/db/cards')
+        apiFetch('/api/db/stats'),
+        apiFetch('/api/db/cards')
       ]);
 
       if (statsRes.ok) {
@@ -64,13 +72,17 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
   );
 
   const handleDeleteCard = async (rcNo: string) => {
-    if (!confirm(`Are you sure you want to delete Ration Card ${rcNo} from the PostgreSQL database?`)) return;
+    setDeletingRcNo(rcNo);
     try {
-      await fetch(`/api/db/cards/${rcNo}`, { method: 'DELETE' });
-      setCards(prev => prev.filter(c => c.rcNo !== rcNo));
-      fetchDbData();
+      const res = await apiFetch(`/api/db/cards/${rcNo}`, { method: 'DELETE' });
+      if (res.ok) {
+        setCards(prev => prev.filter(c => c.rcNo !== rcNo));
+        fetchDbData();
+      }
     } catch (err) {
-      alert('Failed to delete card from database');
+      console.error('Failed to delete card:', err);
+    } finally {
+      setDeletingRcNo(null);
     }
   };
 
@@ -189,6 +201,30 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
             <div className="font-semibold text-purple-300 font-mono text-sm">{dbStats?.uniqueDistricts || 0} Districts</div>
           </div>
         </div>
+
+        {/* CG State Portal Hierarchy Database Tables Status */}
+        {dbStats?.hierarchy && (
+          <div className="px-6 py-2 bg-indigo-950/40 border-b border-indigo-900/40 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span className="text-slate-300 flex items-center gap-1.5 font-medium">
+              <Database className="w-3.5 h-3.5 text-indigo-400" />
+              RDBMS Hierarchy Tables:
+            </span>
+            <div className="flex items-center gap-2">
+              <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-300 font-mono">
+                cg_districts: <strong className="text-indigo-400">{dbStats.hierarchy.districtsCount}</strong>
+              </span>
+              <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-300 font-mono">
+                cg_blocks: <strong className="text-sky-400">{dbStats.hierarchy.blocksCount}</strong>
+              </span>
+              <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-300 font-mono">
+                cg_fps: <strong className="text-emerald-400">{dbStats.hierarchy.fpsCount}</strong>
+              </span>
+              <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-300 font-mono">
+                cg_fps_rc_numbers: <strong className="text-amber-400">{dbStats.hierarchy.rcCount}</strong>
+              </span>
+            </div>
+          </div>
+        )}
 
         {/* Search & Export Toolbar */}
         <div className="px-6 py-3 bg-slate-850 border-b border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">

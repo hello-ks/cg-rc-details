@@ -74,3 +74,19 @@ export interface ApiKeyRecord {
   lastUsed: string | null;
   requestCount: number;
 }
+
+export interface AuthUser {
+  id?: number;
+  username: string;
+  name: string;
+  role: string;
+  lastLogin?: string | null;
+}
+
+export interface AuthSessionState {
+  isAuthenticated: boolean;
+  token: string | null;
+  user: AuthUser | null;
+  isLoading: boolean;
+}
+
